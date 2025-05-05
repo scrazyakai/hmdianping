@@ -3,6 +3,7 @@ package com.hmdp.controller;
 
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Voucher;
+import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.service.IVoucherService;
 import org.springframework.web.bind.annotation.*;
 
@@ -22,6 +23,8 @@ public class VoucherController {
 
     @Resource
     private IVoucherService voucherService;
+    @Resource
+    private IVoucherOrderService voucherOrderService;
 
     /**
      * 新增普通券

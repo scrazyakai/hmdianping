@@ -69,41 +69,47 @@ public class CacheClient {
     //线程池
     private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
     public <R,ID> R queryWithLogicalExpire(String keyPrefix, ID id, Class<R> type, Function<ID,R> dbFunction,Long time, TimeUnit unit) {
-        String key = CACHE_SHOP_KEY + id;
+        String key = keyPrefix + id;
         String shopJSON = stringRedisTemplate.opsForValue().get(key);
+        // 1.判断是否存在
         if(StrUtil.isBlank(shopJSON)){
             return null;
         }
-        //命中，将JSON反序列化为对象
+        // 2.命中，将JSON反序列化为对象
         RedisData redisDate = JSONUtil.toBean(shopJSON, RedisData.class);
         R r = JSONUtil.toBean(JSONUtil.toJsonStr(redisDate.getData()), type);
         LocalDateTime expireTime = redisDate.getExpireTime();
-        if(LocalDateTime.now().isAfter(expireTime)){
-            //未过期
+        
+        // 3.判断是否过期（注意判空和逻辑）
+        if(expireTime != null && LocalDateTime.now().isBefore(expireTime)){
+            // 未过期，直接返回
             return r;
         }
-        // 获取互斥锁
+        
+        // 4.已过期，需要缓存重建
         String lockKey = LOCK_SHOP_KEY + id;
         boolean isLock = tryLock(lockKey);
-        //判断是否获取锁成功
-        if(isLock){
-            //启线程实现缓存重建
-            CACHE_REBUILD_EXECUTOR.submit(()->{
-                try {
-                    //查询数据库
-                    R r1 = dbFunction.apply(id);
-                    //写入Redis
-                    this.setWithLogicalExpire(key,r1,time,unit);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                } finally {
-                    //释放锁
-                    unlock(lockKey);
-                }
-
-            });
+        try {
+            if(isLock){
+                // 获取锁成功，开启独立线程实现缓存重建
+                CACHE_REBUILD_EXECUTOR.submit(()->{
+                    try {
+                        // 查询数据库
+                        R r1 = dbFunction.apply(id);
+                        // 写入Redis
+                        this.setWithLogicalExpire(key,r1,time,unit);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    } finally {
+                        unlock(lockKey);
+                    }
+                });
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
-        //返回过期的缓存
+        
+        // 返回过期的数据
         return r;
     }
 }
