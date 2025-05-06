@@ -1,9 +1,7 @@
 package com.hmdp.service.impl;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.hmdp.dto.Result;
-import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.SeckillVoucher;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.VoucherOrderMapper;
@@ -11,22 +9,18 @@ import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import com.sun.istack.internal.NotNull;
+import org.springframework.aop.framework.AopContext;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
-import org.springframework.data.redis.core.RedisCallback;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
-import java.util.Collections;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
  * <p>
@@ -48,6 +42,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     @Lazy
     private IVoucherOrderService voucherOrderService;
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
 
     /**
      * 秒杀优惠券
@@ -74,9 +70,17 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("库存不足");
         }
         Long userId = UserHolder.getUser().getId();
-        synchronized (userId.toString().intern()) {
-            //            IVoucherOrderService voucherOrderService = (IVoucherOrderService) AopContext.currentProxy();
+        //创建锁
+        SimpleRedisLock simpleRedisLock = new SimpleRedisLock("order:" + userId,stringRedisTemplate);
+        boolean isLock = simpleRedisLock.tryLock(10);
+        if(!isLock){
+            return Result.fail("一人仅允许下一单");
+        }
+        try {
+            IVoucherOrderService voucherOrderService = (IVoucherOrderService) AopContext.currentProxy();
             return voucherOrderService.getResult(voucherId);
+        } finally {
+            simpleRedisLock.unlock();
         }
     }
 
