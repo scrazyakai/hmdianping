@@ -82,10 +82,12 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
     //消息队列
     class VoucherOrderHandler implements Runnable{
+        private static final long REDIS_CONNECTION_RETRY_DELAY_MS = 5000; // 5秒
+        private static final long PENDING_LIST_ERROR_DELAY_MS = 1000; // 1秒
+
         @Override
         public void run() {
-            while (true){
-
+            while (!Thread.currentThread().isInterrupted()){ // 检查中断状态
                 try {
                     //获取消息队列中的订单消息 XREAD GROUP g1 c1 COUNT 1 BLOCK 2000 STREAM queueNAME
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
@@ -96,7 +98,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
                     //判断消息是否获取成功
                     if(list == null || list.isEmpty() ){
-
+                        // 无新消息，继续下一次轮询
                         continue;
                     }
                     //解析订单中的消息
@@ -108,28 +110,49 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     handlerVoucherOrder(voucherOrder);
                     //ACK 确认 XACK stream.order g1 id
                     stringRedisTemplate.opsForStream().acknowledge(queueName,"g1",record.getId() );
-                } catch (Exception e) {
-                    log.error("订单异常",e);
+                } catch (org.springframework.data.redis.RedisSystemException e) {
+                    log.error("订单处理时发生Redis系统异常，将稍后重试: {}", e.getMessage());
+                    try {
+                        Thread.sleep(REDIS_CONNECTION_RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        log.warn("订单处理线程在休眠时被中断");
+                        Thread.currentThread().interrupt(); // 重新设置中断状态
+                        break; // 退出循环
+                    }
+                    // 发生连接相关的系统异常后，可以尝试处理pending list，
+                    // 但如果handlerPendingList也因连接问题失败，它内部也应该有合理的退避策略
                     handlerPendingList();
+                } catch (Exception e) {
+                    log.error("订单处理时发生未知异常",e);
+                    // 对于其他类型的异常，也考虑是否需要不同的处理逻辑或延迟
+                    try {
+                        Thread.sleep(PENDING_LIST_ERROR_DELAY_MS); // 对于其他异常，也稍作等待
+                    } catch (InterruptedException ie) {
+                        log.warn("订单处理线程在休眠时被中断");
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    handlerPendingList(); // 尝试处理pending list
                 }
             }
+            log.info("VoucherOrderHandler 线程已停止。");
         }
 
         private void handlerPendingList() {
-            while (true){
-
+            while (!Thread.currentThread().isInterrupted()){ // 检查中断状态
                 try {
-                    //获取消息队列中的订单消息 XREAD GROUP g1 c1 COUNT 1 BLOCK 2000 STREAM queueNAME
+                    //获取消息队列中的订单消息 XREAD GROUP g1 c1 COUNT 1 STREAM queueNAME 0
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
                             Consumer.from("g1", "c1"),
-                            StreamReadOptions.empty().count(1),
-                            StreamOffset.create(queueName, ReadOffset.from("0"))
+                            StreamReadOptions.empty().count(1), // 不阻塞，立即返回
+                            StreamOffset.create(queueName, ReadOffset.from("0")) // 从pending-list的开头读取
                     );
 
                     //判断消息是否获取成功
                     if(list == null || list.isEmpty() ){
-                        //pendingList中没有消息
-                        break;
+                        //pendingList中没有消息或处理完毕
+                        log.info("Pending-list中没有更多消息需要处理。");
+                        break; // 退出pending-list处理
                     }
                     //解析订单中的消息
                     MapRecord<String, Object, Object> record = list.get(0);
@@ -140,10 +163,28 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     handlerVoucherOrder(voucherOrder);
                     //ACK 确认 XACK stream.order g1 id
                     stringRedisTemplate.opsForStream().acknowledge(queueName,"g1",record.getId() );
-                } catch (Exception e) {
-                    log.error("订单异常",e);
+                } catch (org.springframework.data.redis.RedisSystemException e) {
+                    log.error("处理pending-list订单时发生Redis系统异常，将稍后重试: {}", e.getMessage());
+                    try {
+                        Thread.sleep(REDIS_CONNECTION_RETRY_DELAY_MS); // Redis连接问题，较长等待
+                    } catch (InterruptedException interruptedException) {
+                        log.warn("Pending-list处理线程在休眠时被中断");
+                        Thread.currentThread().interrupt(); // 重新设置中断状态
+                        break; // 退出循环
+                    }
+                }
+                catch (Exception e) {
+                    log.error("处理pending-list订单时发生未知异常",e);
+                    try {
+                        Thread.sleep(PENDING_LIST_ERROR_DELAY_MS); // 其他异常，较短等待
+                    } catch (InterruptedException interruptedException) {
+                        log.warn("Pending-list处理线程在休眠时被中断");
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                 }
             }
+            log.info("handlerPendingList 处理循环结束。");
         }
     }
 //    @PostConstruct
