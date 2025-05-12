@@ -13,7 +13,7 @@ spring:
     port: 6379
     lettuce:
       pool:
-        max-active: 32
+        max-active: 10
         max-idle: 8
         min-idle: 0
         max-wait: -1ms
@@ -27,4 +27,5 @@ mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
 logging:
   level:
-    com.hmdp: debug
+    io.lettuce.core: error
+    org.springframework.data.redis: error

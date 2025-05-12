@@ -3,6 +3,7 @@ package com.hmdp.controller;
 
 import com.hmdp.dto.Result;
 import com.hmdp.service.IFollowService;
+import com.hmdp.service.IShopService;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
@@ -20,6 +21,8 @@ import javax.annotation.Resource;
 public class FollowController {
     @Resource
     private IFollowService followService;
+    @Resource
+    private IShopService shopService;
     @PutMapping("/{id}/{isFollow}")
     public Result follow(@PathVariable("id") Long followUserId,@PathVariable("isFollow") Boolean isFollow) {
         return followService.follow(followUserId,isFollow);
@@ -32,4 +35,5 @@ public class FollowController {
     public Result followCommon(@PathVariable("id") Long id) {
         return followService.followCommon(id);
     }
+
 }
