@@ -12,29 +12,20 @@ import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisIdWorker;
-import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
-import com.sun.istack.internal.NotNull;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.aop.framework.AopContext;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
-import org.springframework.core.annotation.Order;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.connection.stream.*;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.PostMapping;
-
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 import java.time.Duration;
-import java.time.LocalDateTime;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -65,15 +56,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private RedissonClient redissonClient;
-
-    /**
-     * 当前类初始化完毕就立马执行该方法
-     */
-    @PostConstruct
-    private void init() {
-        // 执行线程任务
-        SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
-    }
 
 
     /**
@@ -113,7 +95,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     handleVoucherOrder(voucherOrder);
                     // 4、ACK确认 SACK stream.orders g1 id
                     stringRedisTemplate.opsForStream().acknowledge(queueName, "g1", record.getId());
-                    
+
                 } catch (Exception e) {
                     log.info("处理异常订单");
                     // 处理积压消息
@@ -160,15 +142,15 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private void handleVoucherOrder(VoucherOrder voucherOrder) {
         Long userId = voucherOrder.getUserId();
         Long voucherId = voucherOrder.getVoucherId();
-        
+
         RLock lock = redissonClient.getLock(RedisConstants.LOCK_ORDER_KEY + userId);
         boolean isLock = lock.tryLock();
-        
+
         if (!isLock) {
             log.error("一人只能下一单");
             return;
         }
-        
+
         try {
             proxy.createVoucherOrder(voucherOrder);
         }finally {
@@ -242,32 +224,61 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     public void createVoucherOrder(VoucherOrder voucherOrder) {
         Long userId = voucherOrder.getUserId();
         Long voucherId = voucherOrder.getVoucherId();
-        
+
         // 1、判断用户是否已购买过此优惠券
         int count = this.count(new LambdaQueryWrapper<VoucherOrder>()
                 .eq(VoucherOrder::getUserId, userId)
                 .eq(VoucherOrder::getVoucherId, voucherId));
-        
+
         if (count >= 1) {
             log.error("用户{}已购买过优惠券{}", userId, voucherId);
             throw new RuntimeException("不能重复购买同一优惠券");
         }
-        
+
         // 2、更新秒杀券库存
         boolean updateSuccess = seckillVoucherService.update(new LambdaUpdateWrapper<SeckillVoucher>()
                 .eq(SeckillVoucher::getVoucherId, voucherId)
                 .gt(SeckillVoucher::getStock, 0)
                 .setSql("stock = stock - 1"));
-        
+
         if (!updateSuccess) {
             throw new RuntimeException("库存不足或更新失败");
         }
 
-        
+
         // 3、创建订单
         boolean saveSuccess = this.save(voucherOrder);
         if (!saveSuccess) {
             throw new RuntimeException("创建订单失败");
         }
+    }
+
+    @PostConstruct
+    private void init() {
+        SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
+
+        // 尝试创建消费者组
+        try {
+            // 判断消费者组是否存在
+            Boolean exists = stringRedisTemplate.hasKey(queueName);
+            if (Boolean.TRUE.equals(exists)) {
+                // 获取消费者组信息
+                StreamInfo.XInfoGroups groups = stringRedisTemplate.opsForStream().groups(queueName);
+                // 判断是否存在 g1 消费者组
+                if (groups.isEmpty() || groups.stream().noneMatch(g -> "g1".equals(g.groupName()))) {
+                    // 创建消费者组
+                    stringRedisTemplate.opsForStream().createGroup(queueName, "g1");
+                    log.info("创建消费者组 g1 成功");
+                }
+            } else {
+                // 如果队列不存在，创建队列和消费者组
+                stringRedisTemplate.opsForStream().createGroup(queueName, "g1");
+                log.info("创建队列 {} 和消费者组 g1 成功", queueName);
+            }
+        } catch (Exception e) {
+            log.error("创建消费者组异常", e);
+        }
+
+        log.info("秒杀订单处理线程启动成功");
     }
 }
